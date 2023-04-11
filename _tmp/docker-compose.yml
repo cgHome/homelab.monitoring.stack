@@ -1,0 +1,160 @@
+version: "3.9"
+
+volumes:
+  syslog-volume: {}
+  loki-volume: {}
+  influxdb-volume: {}
+  postgres-volume: {}
+  grafana-volume: {}
+
+networks:
+  monitoring:
+
+x-healthcheck: &default-healthcheck
+  test: [ "CMD", "echo", "true"]
+  interval: 10s
+  timeout: 60s
+  retries: 5
+  start_period: 20s
+
+services:
+  syslog:
+    image: linuxserver/syslog-ng:${SYSLOGNG_VERSION}
+    container_name: syslog
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+    volumes:
+      - /etc/timezone:/etc/timezone:ro
+      - ./syslog-ng/syslog-ng.conf:/config/syslog-ng.conf
+      - syslog-volume:/config
+      - syslog-volume:/var/log
+    ports:
+      - 514:5514/udp
+      - 601:6601
+    networks:
+      - monitoring
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD", "syslog-ng-ctl", "stats", "-c", "/config/syslog-ng.ctl"]
+    depends_on:
+      - promtail
+    restart: always
+
+  promtail:
+    image: grafana/promtail:${PROMTAIL_VERSION}
+    container_name: promtail
+    hostname: promtail
+    command: "-config.file=/etc/promtail/promtail-config.yaml"
+    # stdin_open: true
+    # tty: true
+    volumes:
+      - ./promtail/:/etc/promtail/
+    ports:
+      - 9080:9080
+      - 1514:1514   # syslog
+    networks:
+      - monitoring
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "wget -t1 -q -O - http://promtail:9080/ready | grep Ready"]
+    depends_on:
+      - loki
+    restart: always
+
+  telegraf:
+    image: telegraf:${TELEGRAF_VERSION}
+    container_name: telegraf
+    # command: --test
+    # user: telegraf:$(stat -c '%g' /var/run/docker.sock) # see: https://www.influxdata.com/blog/docker-run-telegraf-as-non-root/
+    user: telegraf:0
+    environment:
+      # - INFLUXDB_ORG
+      # - INFLUXDB_BUCKET
+      # - INFLUXDB_ADMIN_TOKEN
+      # Plugins
+      - HOST_ETC=/hostfs/etc
+      - HOST_PROC=/hostfs/proc
+      - HOST_SYS=/hostfs/sys
+      - HOST_VAR=/hostfs/var
+      - HOST_RUN=/hostfs/run
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./telegraf:/etc/telegraf:ro
+      - /:/hostfs:ro
+    ports:
+      - 6514:6514   # syslog
+    networks:
+      - monitoring
+    healthcheck:
+      <<: *default-healthcheck
+      # test: ["CMD", "curl", "-f", "http://telegraf:8125/ping"] >>> ??
+    depends_on:
+      - loki
+    restart: always
+
+  loki:
+    image: grafana/loki:${LOKI_VERSION}
+    container_name: loki
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      # - ./loki/loki-config.yaml:/etc/loki/local-config.yaml
+      - loki-volume:/loki
+    ports:
+      - "3100:3100"
+    networks:
+      - monitoring
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "wget -t1 -q -O - http://loki:3100/ready | grep ready"]
+    restart: always
+
+  # influxdb:
+  #   container_name: influxdb
+  #   image: influxdb:${INFLUXDB_VERSION}
+  #   networks:
+  #     - monitoring
+  #   ports:
+  #     - 8086:8086
+  #   healthcheck:
+  #     <<: *default-healthcheck
+  #     test: ["CMD", "curl", "-f", "http://influxdb:8086/ping"]
+  #   restart: on-failure:10
+  #   environment:      
+  #     - DOCKER_INFLUXDB_INIT_MODE=setup
+  #     - DOCKER_INFLUXDB_INIT_USERNAME=${STACK_USER}
+  #     - DOCKER_INFLUXDB_INIT_PASSWORD=${STACK_PASSWORD}
+  #     - DOCKER_INFLUXDB_INIT_ORG=${INFLUXDB_ORG}
+  #     - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUXDB_BUCKET}
+  #     - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_ADMIN_TOKEN}
+  #   volumes:
+  #     - /etc/localtime:/etc/localtime:ro
+  #     - influxdb-volume:/var/lib/influxdb2
+  #     - influxdb-volume:/etc/influxdb2
+
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION}
+    container_name: grafana
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      # - GF_DEFAULT_INSTANCE_NAME=monitoring
+      # - GF_PAHTS_PROVISIONING=
+      # # datasources
+      # - INFLUXDB_ORG
+      # - INFLUXDB_BUCKET
+      # - INFLUXDB_ADMIN_TOKEN
+    volumes:
+      # - ./grafana/grafana.ini:/etc/grafana/grafana.ini:ro
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/dashboards:ro
+      - grafana-volume:/var/lib/grafana:rw
+    ports:
+      - 3000:3000
+    networks:
+      - monitoring
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "wget -t1 -q -O - http://grafana:3000/api/health | grep ok"]
+    restart: always
