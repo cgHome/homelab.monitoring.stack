@@ -78,8 +78,19 @@ services:
 
 - https://towardsdatascience.com/get-system-metrics-for-5-min-with-docker-telegraf-influxdb-and-grafana-97cfd957f0ac
 - https://iosonounrouter.wordpress.com/2020/10/29/quickly-collect-syslogs-with-containerized-tig-stack/
+- https://blog.lrvt.de/monitoring-dashboard-with-grafana-telegraf-influxdb-and-docker/
+- https://www.blackvoid.club/grafana-8-influxdb-2-telegraf-2021-monitoring-stack/
 
 ### Logging
+
+#### influxDB
+
+- https://powersj.io/posts/influxdb-docker-dev/
+- https://www.laub-home.de/wiki/InfluxDB_2_Docker_Installation
+
+#### telegraf
+
+#### loki
 
 - http://blog.ruanbekker.com/cheatsheets/loki/
 - https://ruanbekker.medium.com/logging-with-docker-promtail-and-grafana-loki-d920fd790ca8

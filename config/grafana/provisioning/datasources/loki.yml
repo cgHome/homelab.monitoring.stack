@@ -3,13 +3,14 @@ apiVersion: 1
 deleteDatasources:
   - name: Loki
 
-datasources:
+datasources: 
   - name: Loki
     type: loki
     access: proxy
     orgId: 1
-    url: http://loki:3100
-    isDefault: true
+    url: "http://loki:3100/"
     basicAuth: false
-    version: 1
+    isDefault: false
     editable: false
+    jsonData: 
+      maxLines: 1000

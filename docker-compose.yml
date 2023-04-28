@@ -1,22 +1,12 @@
 version: "3.9"
 
 volumes:
-  syslog-volume: {}
-  loki-volume: {}
-  influxdb-volume: {}
   grafana-volume: {}
+  prometheus-volume: {}
+  loki-volume: {}
 
 networks:
   monitoring:
-
-x-logging: &loki-logging
-  driver: loki
-  options:
-    loki-url: http://localhost:3100/loki/api/v1/push
-    loki-external-labels: job=dockerlog
-    loki-retries: 3
-    mode: non-blocking
-    max-buffer-size: 4m
 
 x-healthcheck: &default-healthcheck
   test: [ "CMD", "echo", "true"]
@@ -30,20 +20,17 @@ services:
     image: grafana/grafana:${GRAFANA_VERSION}
     container_name: grafana
     environment:
-      - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
-      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_BASIC_ENABLED=false
+      # - GF_DEFAULT_INSTANCE_NAME=${INFLUXDB_ORG}
+      # - GF_INSTALL_PLUGINS="list of plugins seperated by ,"
       - GF_SECURITY_ALLOW_EMBEDDING=true
-      # - GF_DEFAULT_INSTANCE_NAME=monitoring
-      # - GF_PAHTS_PROVISIONING=
-      # # datasources
-      - INFLUXDB_ORG
-      - INFLUXDB_BUCKET
-      - INFLUXDB_ADMIN_TOKEN
+      - GF_ENABLE_GZIP=true
     volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/etc/dashboards:ro
       - grafana-volume:/var/lib/grafana:rw
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/etc/dashboards:ro
     ports:
       - 3000:3000
     networks:
@@ -52,12 +39,101 @@ services:
       <<: *default-healthcheck
       test: ["CMD-SHELL", "wget -t1 -q -O - http://grafana:3000/api/health | grep ok"]
     restart: always
-    logging: *loki-logging
+
+  telegraf:
+    image: telegraf:${TELEGRAF_VERSION}
+    container_name: telegraf
+    # command: --test --test-wait=10
+    user: telegraf:0  # see: https://www.influxdata.com/blog/docker-run-telegraf-as-non-root/
+    environment:
+      # Plugins - Docker_Host
+      - HOST_ETC=/hostfs/etc
+      - HOST_PROC=/hostfs/proc
+      - HOST_SYS=/hostfs/sys
+      - HOST_VAR=/hostfs/var
+      - HOST_RUN=/hostfs/run
+      - HOST_MOUNT_PREFIX=/hostfs
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config/telegraf:/etc/telegraf:ro
+      - /:/hostfs:ro
+    ports:
+      - 8125:8125
+      # Plugins
+      # - 514:6514/udp   # syslog (RFC3164)
+      # - 601:6601/tcp   # syslog (RFC5424)
+      # - 601:6601/udp   
+    networks:
+      - monitoring
+    healthcheck:
+      <<: *default-healthcheck
+      # test: ["CMD", "curl", "-f", "http://telegraf:8125/ping"] >>> ??
+    depends_on:
+      - prometheus
+    restart: always
+
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_VERSION}
+    container_name: prometheus
+    command: 
+      # --log.level=debug   # Only for test
+      --config.file=/etc/prometheus/prometheus.yml 
+    user: root
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-volume:/prometheus
+    ports:
+      - 9090:9090
+    networks:
+      - monitoring
+    healthcheck: 
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "wget -t1 -q -O - http://prometheus:9090/-/healthy | grep Healthy"]
+    depends_on:
+      - grafana
+    restart: always
+
+  syslog-ng:
+    image: balabit/syslog-ng:${SYSLOGNG_VERSION}
+    container_name: syslog-ng
+    # command: -edv
+    volumes:
+      - ./config/syslog-ng.conf:/etc/syslog-ng/syslog-ng.conf:ro
+    ports:
+      - 514:5514/udp
+      - 601:6601/tcp
+    networks:
+      - monitoring
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD", "/usr/sbin/syslog-ng-ctl", "stats"]
+    depends_on:
+      - promtail
+    restart: always
+
+  promtail:
+    image: grafana/promtail:${PROMTAIL_VERSION}
+    container_name: promtail
+    command: "-config.file=/etc/promtail/promtail-config.yml"
+    ports:
+      - 1514:1514
+      - 9080:9080
+    networks:
+      - monitoring
+    volumes:
+      - ./config/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock 
+    healthcheck:
+      <<: *default-healthcheck
+      # test: ["CMD-SHELL", "wget -t1 -q -O - http://promtail:9080/ready | grep ok"] >> command not found
+    depends_on:
+      - loki
+    restart: always
 
   loki:
     image: grafana/loki:${LOKI_VERSION}
     container_name: loki
-    hostname: loki
     command: -config.file=/etc/loki/local-config.yaml
     volumes:
       - loki-volume:/loki
@@ -71,109 +147,3 @@ services:
     depends_on:
       - grafana
     restart: always
-    logging: *loki-logging
-
-
-  promtail:
-    image: grafana/promtail:${PROMTAIL_VERSION}
-    container_name: promtail
-    hostname: promtail
-    command: "-config.file=/etc/promtail/promtail-config.yaml"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./promtail/:/etc/promtail/
-    ports:
-      - 9080:9080
-      - 1514:1514   # syslog-ng
-    networks:
-      - monitoring
-    healthcheck:
-      <<: *default-healthcheck
-      # test: ["CMD-SHELL", "wget -t1 -q -O - http://promtail:9080/ready | grep Ready"]
-    depends_on:
-      - loki
-    restart: always
-    logging: *loki-logging
-
-    
-  syslog:
-    image: linuxserver/syslog-ng:${SYSLOGNG_VERSION}
-    container_name: syslog
-    hostname: syslog
-    environment:
-      - PUID=${PUID}
-      - PGID=${PGID}
-    volumes:
-      - /etc/timezone:/etc/timezone:ro
-      - ./syslog-ng/syslog-ng.conf:/config/syslog-ng.conf
-      - syslog-volume:/config
-      # - syslog-volume:/var/log
-    ports:
-      - 514:5514/udp
-      # - 601:6601/tcp    # FIXME: not working
-    networks:
-      - monitoring
-    healthcheck:
-      <<: *default-healthcheck
-      test: ["CMD", "syslog-ng-ctl", "stats", "-c", "/config/syslog-ng.ctl"]
-    depends_on:
-      - promtail
-    restart: always
-
-  # influxdb:
-  #   image: influxdb:${INFLUXDB_VERSION}
-  #   profiles: ["metrics"]
-  #   container_name: influxdb
-  #   environment:      
-  #     - DOCKER_INFLUXDB_INIT_MODE=setup
-  #     - DOCKER_INFLUXDB_INIT_USERNAME=${STACK_USER}
-  #     - DOCKER_INFLUXDB_INIT_PASSWORD=${STACK_PASSWORD}
-  #     - DOCKER_INFLUXDB_INIT_ORG=${INFLUXDB_ORG}
-  #     - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUXDB_BUCKET}
-  #     - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_ADMIN_TOKEN}
-  #   volumes:
-  #     - /etc/localtime:/etc/localtime:ro
-  #     - influxdb-volume:/var/lib/influxdb2
-  #     - influxdb-volume:/etc/influxdb2
-  #   ports:
-  #     - 8086:8086
-  #   networks:
-  #     - monitoring
-  #   healthcheck:
-  #     <<: *default-healthcheck
-  #     test: ["CMD", "curl", "-f", "http://influxdb:8086/ping"]
-  #   restart: on-failure:10
-
-  # telegraf:
-  #   image: telegraf:${TELEGRAF_VERSION}
-  #   container_name: telegraf
-  #   # command: --test --test-wait=10
-  #   user: telegraf:0  # see: https://www.influxdata.com/blog/docker-run-telegraf-as-non-root/
-  #   environment:
-  #     # - INFLUXDB_ORG
-  #     # - INFLUXDB_BUCKET
-  #     # - INFLUXDB_ADMIN_TOKEN
-  #     # Plugins
-  #     - HOST_ETC=/hostfs/etc
-  #     - HOST_PROC=/hostfs/proc
-  #     - HOST_SYS=/hostfs/sys
-  #     - HOST_VAR=/hostfs/var
-  #     - HOST_RUN=/hostfs/run
-  #   volumes:
-  #     - /var/run/docker.sock:/var/run/docker.sock
-  #     - ./telegraf:/etc/telegraf:ro
-  #     - /:/hostfs:ro
-  #   ports:
-  #     - 8125:8125
-  #     # Plugins
-  #     - 514:6514/udp   # syslog (RFC3164)
-  #     - 601:6601/tcp   # syslog (RFC5424)
-  #     - 601:6601/udp   
-  #   networks:
-  #     - monitoring
-  #   healthcheck:
-  #     <<: *default-healthcheck
-  #     # test: ["CMD", "curl", "-f", "http://telegraf:8125/ping"] >>> ??
-  #   depends_on:
-  #     - loki
-  #   restart: always
